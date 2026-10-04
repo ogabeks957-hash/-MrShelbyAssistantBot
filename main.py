@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("bot")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-MODEL = "llama-3.3-70b-versatile"
+MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # Лимит: не больше N ответов в окне WINDOW секунд на один чат
 MAX_REPLIES = 8
@@ -147,7 +147,7 @@ def ask_ai(system_prompt: str, transcript: str) -> str:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": transcript},
         ],
-        max_tokens=400,
+        max_tokens=1000,
         temperature=0.9,
     )
     return (r.choices[0].message.content or "").strip()
@@ -155,6 +155,9 @@ def ask_ai(system_prompt: str, transcript: str) -> str:
 
 @dp.business_message()
 async def handle_business_message(message: Message):
+    log.info("Получено: chat=%s from=%s text=%r", message.chat.id,
+             message.from_user.id if message.from_user else None, message.text)
+
     if not message.text:
         return
 
@@ -198,6 +201,7 @@ async def handle_business_message(message: Message):
             )
 
         if not reply_text:
+            log.warning("Модель вернула пустой ответ")
             return
         chat_log.append(("Дима", reply_text))
         await bot.send_message(
@@ -207,6 +211,11 @@ async def handle_business_message(message: Message):
         )
     except Exception:
         log.exception("Ошибка при обработке сообщения")
+
+
+@dp.business_connection()
+async def on_connection(conn):
+    log.info("Подключение: user=%s enabled=%s", conn.user.id, conn.is_enabled)
 
 
 async def main():
