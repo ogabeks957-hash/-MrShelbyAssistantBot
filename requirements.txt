@@ -1,3 +1,2 @@
-pyrofork
-tgcrypto
+aiogram>=3.13
 openai
