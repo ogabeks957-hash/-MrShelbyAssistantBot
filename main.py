@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import random
 import asyncio
 import logging
 import threading
@@ -21,6 +22,14 @@ MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 MAX_REPLIES = 8
 WINDOW = 60
 
+# Пауза перед ответом (секунды)
+DELAY_MIN = 7
+DELAY_MAX = 10
+
+# Метка, по которой бот сообщает владельцу об интересе собеседницы
+INTEREST_TAG = "[ИНТЕРЕС]"
+INTEREST_RE = re.compile(r"\[\s*ИНТЕРЕС\s*\]", re.I)
+
 ai = OpenAI(
     api_key=os.getenv("GROQ_API_KEY"),
     base_url="https://api.groq.com/openai/v1",
@@ -30,14 +39,17 @@ dp = Dispatcher()
 
 BASE_PROMPT = (
     "Ты помогаешь вести переписку от имени владельца аккаунта. Его зовут Дмитрий, "
-    "друзья называют Дима или Димон. Пиши от первого лица, как живой парень, "
-    "коротко, разговорно, без канцеляризмов. Копируй стиль, длину сообщений и "
-    "манеру речи, которые видны в ранее написанных сообщениях Димы.\n"
-    "Если собеседник спрашивает, бот ли ты, человек ли ты или пишет ли Дима "
-    "лично, никогда не отрицай: честно скажи, что ты ассистент Димы и отвечаешь "
-    "за него.\n"
-    "Задавай максимум один вопрос за сообщение и не задавай то, что уже "
-    "известно из переписки.\n"
+    "друзья называют Дима или Димон. Пиши от первого лица, как живой парень: "
+    "коротко, разговорно, с юмором, без канцеляризмов, иногда эмодзи. "
+    "Копируй стиль, длину сообщений и манеру речи, которые видны в ранее "
+    "написанных сообщениях Димы.\n"
+    "Сам не объявляй, что ты бот или ассистент, просто общайся. "
+    "Но если собеседник прямо спрашивает, бот ли ты или человек, никогда не "
+    "отрицай: честно скажи, что ты ассистент Димы.\n"
+    "Никого не приглашай к себе домой и не назначай встречи. Если разговор "
+    "идёт к встрече, мягко и с шуткой уходи от конкретики.\n"
+    "Задавай максимум один вопрос за сообщение, чаще цепляйся за то, что "
+    "человек только что написал, и не спрашивай то, что уже известно.\n"
 )
 
 PROMPT_UNKNOWN = BASE_PROMPT + (
@@ -49,11 +61,18 @@ PROMPT_UNKNOWN = BASE_PROMPT + (
 )
 
 PROMPT_ADULT = BASE_PROMPT + (
-    "Собеседник сам назвал возраст 18+. "
-    "Если это девушка: флиртуй уверенно, делай комплименты, шути с намёками "
-    "и лёгким юмором 18+, но без откровенных сексуальных описаний. "
-    "Если собеседник парень: общайся по-дружески, на бро, с юмором. "
-    "Если человек даёт понять, что ему неприятно, сразу переходи на нейтральный тон."
+    "Собеседник сам назвал возраст 18+.\n"
+    "Если это девушка: ты уверенный, остроумный и обаятельный. Флиртуй "
+    "по-настоящему: дразни и подкалывай по-доброму, делай конкретные "
+    "комплименты тому, что она написала, играй в «горячо-холодно», шути с "
+    "намёками и лёгким юмором 18+, держи интригу и лёгкое напряжение. "
+    "Без откровенных сексуальных описаний. Не дави и не торопи события. "
+    "Если ей неприятно или она отказывает, сразу извинись шуткой и перейди "
+    "на нейтральный тон.\n"
+    "Если собеседница явно проявляет интерес к личному общению или встрече "
+    "с Димой, добавь в самый конец ответа метку [ИНТЕРЕС] (только когда "
+    "интерес явный). Саму встречу не назначай.\n"
+    "Если собеседник парень: общайся по-дружески, на бро, с юмором."
 )
 
 PROMPT_MINOR = BASE_PROMPT + (
@@ -63,10 +82,12 @@ PROMPT_MINOR = BASE_PROMPT + (
 )
 
 # Состояние в памяти (после рестарта сбросится)
-owners = {}      # business_connection_id -> owner user id
-history = {}     # chat_id -> [(кто, текст)]
-age_state = {}   # chat_id -> "adult" | "minor" (если нет ключа: неизвестно)
-recent = {}      # chat_id -> deque меток времени ответов
+owners = {}       # business_connection_id -> owner user id
+owner_chats = {}  # business_connection_id -> chat id владельца с ботом
+history = {}      # chat_id -> [(кто, текст)]
+age_state = {}    # chat_id -> "adult" | "minor" (нет ключа: неизвестно)
+recent = {}       # chat_id -> deque меток времени ответов
+notified = set()  # чаты, по которым владельцу уже написали
 
 AGE_PATTERNS = [
     re.compile(r"\bмне\s+(\d{1,2})\b", re.I),
@@ -165,6 +186,7 @@ async def handle_business_message(message: Message):
     if conn_id not in owners:
         conn = await bot.get_business_connection(conn_id)
         owners[conn_id] = conn.user.id
+        owner_chats[conn_id] = getattr(conn, "user_chat_id", conn.user.id)
 
     chat_id = message.chat.id
     is_owner = bool(message.from_user and message.from_user.id == owners[conn_id])
@@ -188,6 +210,7 @@ async def handle_business_message(message: Message):
         # Прямой вопрос «ты бот?» отвечаем без модели, чтобы не соврала
         if BOT_QUESTION.search(message.text):
             reply_text = "Если честно, да: я ассистент Димы и отвечаю за него 🙂"
+            interested = False
         else:
             transcript = (
                 f"Переписка Димы с человеком по имени {name} (в Telegram). "
@@ -199,16 +222,36 @@ async def handle_business_message(message: Message):
             reply_text = await asyncio.to_thread(
                 ask_ai, pick_prompt(chat_id), transcript
             )
+            # Метка интереса: убираем из текста, запоминаем факт
+            interested = bool(INTEREST_RE.search(reply_text))
+            reply_text = INTEREST_RE.sub("", reply_text).strip()
 
         if not reply_text:
             log.warning("Модель вернула пустой ответ")
             return
+
+        # Пауза, чтобы ответ приходил не мгновенно
+        await asyncio.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+
         chat_log.append(("Дима", reply_text))
         await bot.send_message(
             chat_id=chat_id,
             text=reply_text,
             business_connection_id=conn_id,
         )
+
+        # Уведомление владельцу (только для 18+ и один раз на чат)
+        if (interested and age_state.get(chat_id) == "adult"
+                and chat_id not in notified):
+            notified.add(chat_id)
+            try:
+                await bot.send_message(
+                    chat_id=owner_chats[conn_id],
+                    text=(f"🔥 {name} проявляет интерес к общению. "
+                          "Загляни в чат и подключайся сам."),
+                )
+            except Exception:
+                log.exception("Не удалось отправить уведомление владельцу")
     except Exception:
         log.exception("Ошибка при обработке сообщения")
 
