@@ -1,6 +1,6 @@
 import os
 import asyncio
-from pyrogram import Client, filters
+from pyrogram import Client
 from pyrogram.types import Message
 from openai import OpenAI
 
@@ -46,5 +46,10 @@ async def handle_business_message(client: Client, message: Message):
     except Exception as e:
         print(f"Ошибка при обработке сообщения: {e}")
 
+async def main():
+    async with app:
+        print("Бот успешно запущен!")
+        await asyncio.Event().wait()
+
 if __name__ == "__main__":
-    app.run()
+    asyncio.run(main())
