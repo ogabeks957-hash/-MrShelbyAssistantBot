@@ -5,14 +5,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL = "gemini-2.5-flash"
+MODEL = "llama-3.3-70b-versatile"
 
-gemini = genai.Client(api_key=GEMINI_API_KEY)
+ai = OpenAI(
+    api_key=os.getenv("GROQ_API_KEY"),
+    base_url="https://api.groq.com/openai/v1",
+)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
@@ -33,7 +34,7 @@ SYSTEM_PROMPT = (
 )
 
 owners = {}
-history = {}  # chat_id -> список (кто, текст)
+history = {}
 
 
 class PingHandler(BaseHTTPRequestHandler):
@@ -51,17 +52,17 @@ def run_web():
     HTTPServer(("0.0.0.0", port), PingHandler).serve_forever()
 
 
-def ask_gemini(transcript: str) -> str:
-    response = gemini.models.generate_content(
+def ask_ai(transcript: str) -> str:
+    r = ai.chat.completions.create(
         model=MODEL,
-        contents=transcript,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            max_output_tokens=400,
-            temperature=0.9,
-        ),
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": transcript},
+        ],
+        max_tokens=400,
+        temperature=0.9,
     )
-    return (response.text or "").strip()
+    return (r.choices[0].message.content or "").strip()
 
 
 @dp.business_message()
@@ -80,7 +81,7 @@ async def handle_business_message(message: Message):
 
     log = history.setdefault(chat_id, [])
     log.append(("Дима" if is_owner else name, message.text))
-    del log[:-30]  # помним последние 30 сообщений
+    del log[:-30]
 
     if is_owner:
         return
@@ -94,7 +95,7 @@ async def handle_business_message(message: Message):
     )
 
     try:
-        reply_text = await asyncio.to_thread(ask_gemini, transcript)
+        reply_text = await asyncio.to_thread(ask_ai, transcript)
         if not reply_text:
             return
         log.append(("Дима", reply_text))
