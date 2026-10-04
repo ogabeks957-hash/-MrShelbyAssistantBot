@@ -1,15 +1,15 @@
 import os
 import asyncio
+
+# Event loop нужно создать ДО импорта pyrogram
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from pyrogram import Client
 from pyrogram.types import Message
 from openai import OpenAI
-
-# Создаём event loop для Python 3.14+ до инициализации Client
-try:
-    loop = asyncio.get_running_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -37,7 +37,8 @@ async def handle_business_message(client: Client, message: Message):
         return
 
     try:
-        response = openai_client.chat.completions.create(
+        response = await asyncio.to_thread(
+            openai_client.chat.completions.create,
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -59,4 +60,4 @@ async def main():
         await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    loop.run_until_complete(main())
+    asyncio.run(main())
