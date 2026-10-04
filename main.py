@@ -17,12 +17,23 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 SYSTEM_PROMPT = (
-    "Отвечай от первого лица как живой человек, владелец аккаунта. "
-    "Пиши просто, понятным разговорным языком, без канцеляризмов и шаблонов бота. "
-    "Отвечай кратко, как в обычной переписке, не признавайся, что ты ИИ или бот."
+    "Ты отвечаешь в переписке от имени владельца аккаунта. Его зовут Дмитрий, "
+    "друзья называют Дима или Димон. Пиши от первого лица, как живой парень, "
+    "коротко, разговорно, без канцеляризмов. Копируй стиль, длину сообщений и "
+    "манеру речи, которые видны в ранее написанных сообщениях Димы.\n\n"
+    "Если собеседник девушка: флиртуй уверенно и чётко, делай комплименты, "
+    "шути с намёками и лёгким пошлым юмором 18+, но без откровенных "
+    "сексуальных описаний. Ненавязчиво выясняй, как её зовут, сколько ей лет, "
+    "чем занимается. Задавай максимум один вопрос за сообщение и не задавай "
+    "то, что уже известно из переписки.\n"
+    "Если собеседник парень: общайся по-дружески, на бро, с юмором.\n"
+    "Если собеседнику меньше 18 лет или это похоже на школьника, не флиртуй "
+    "и не шути про 18+: общайся нейтрально и дружелюбно.\n"
+    "Если пол неясен, сначала общайся нейтрально и узнай имя."
 )
 
 owners = {}
+history = {}  # chat_id -> список (кто, текст)
 
 
 class PingHandler(BaseHTTPRequestHandler):
@@ -40,14 +51,14 @@ def run_web():
     HTTPServer(("0.0.0.0", port), PingHandler).serve_forever()
 
 
-def ask_gemini(text: str) -> str:
+def ask_gemini(transcript: str) -> str:
     response = gemini.models.generate_content(
         model=MODEL,
-        contents=text,
+        contents=transcript,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
-            max_output_tokens=300,
-            temperature=0.7,
+            max_output_tokens=400,
+            temperature=0.9,
         ),
     )
     return (response.text or "").strip()
@@ -55,7 +66,6 @@ def ask_gemini(text: str) -> str:
 
 @dp.business_message()
 async def handle_business_message(message: Message):
-    print("Получено сообщение:", message.text)
     if not message.text:
         return
 
@@ -64,16 +74,32 @@ async def handle_business_message(message: Message):
         conn = await bot.get_business_connection(conn_id)
         owners[conn_id] = conn.user.id
 
-    # не отвечаем на сообщения самого владельца
-    if message.from_user and message.from_user.id == owners[conn_id]:
+    chat_id = message.chat.id
+    is_owner = bool(message.from_user and message.from_user.id == owners[conn_id])
+    name = message.chat.first_name or "Собеседник"
+
+    log = history.setdefault(chat_id, [])
+    log.append(("Дима" if is_owner else name, message.text))
+    del log[:-30]  # помним последние 30 сообщений
+
+    if is_owner:
         return
 
+    transcript = (
+        f"Переписка Димы с человеком по имени {name} (в Telegram). "
+        "Ниже последние сообщения. Напиши следующий ответ Димы, "
+        "только текст ответа.\n\n"
+        + "\n".join(f"{who}: {text}" for who, text in log)
+        + "\nДима:"
+    )
+
     try:
-        reply_text = await asyncio.to_thread(ask_gemini, message.text)
+        reply_text = await asyncio.to_thread(ask_gemini, transcript)
         if not reply_text:
             return
+        log.append(("Дима", reply_text))
         await bot.send_message(
-            chat_id=message.chat.id,
+            chat_id=chat_id,
             text=reply_text,
             business_connection_id=conn_id,
         )
